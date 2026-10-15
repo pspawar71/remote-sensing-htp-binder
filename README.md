@@ -58,13 +58,13 @@ Replace `YOUR_USERNAME` and `YOUR_REPOSITORY`.
 ### Launch the Shiny application directly
 
 ```text
-https://mybinder.org/v2/gh/YOUR_USERNAME/YOUR_REPOSITORY/main?urlpath=proxy/3838/
+https://mybinder.org/v2/gh/pspawar71/remote-sensing-htp-binder/main?urlpath=proxy/3838/
 ```
 
 ### Launch browser-based RStudio
 
 ```text
-https://mybinder.org/v2/gh/YOUR_USERNAME/YOUR_REPOSITORY/main?urlpath=rstudio
+https://mybinder.org/v2/gh/pspawar71/remote-sensing-htp-binder/main?urlpath=rstudio
 ```
 
 ## Important Binder behavior
