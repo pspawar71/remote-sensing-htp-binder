@@ -53,8 +53,6 @@ git push
 
 ## Binder links
 
-Replace `YOUR_USERNAME` and `YOUR_REPOSITORY`.
-
 ### Launch the Shiny application directly
 
 ```text
