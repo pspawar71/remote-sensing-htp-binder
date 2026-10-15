@@ -34,7 +34,14 @@ RUN chown -R ${NB_UID}:users ${APP_HOME} \
 RUN mkdir -p /home/rstudio/pawar \
     && cp -a ${APP_HOME}/. /home/rstudio/pawar/ \
     && chmod -R a+rwX /home/rstudio/pawar
+RUN mkdir -p /home/${NB_USER}/.jupyter
 
+COPY jupyter_server_config.py \
+    /home/${NB_USER}/.jupyter/jupyter_server_config.py
+
+RUN chown -R ${NB_UID}:users \
+    /home/${NB_USER}/.jupyter
+    
 USER ${NB_USER}
 
 WORKDIR ${APP_HOME}
