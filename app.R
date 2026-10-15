@@ -11,7 +11,6 @@ library(terra)
 library(leaflet)
 library(leaflet.extras)
 library(sf)
-library(jsonlite)
 
 # ------------------------- FILES ------------------------------
 image_dir <- file.path(getwd(), "image")
@@ -26,7 +25,24 @@ missing <- paths[!file.exists(paths)]
 if(length(missing)) stop(paste("Missing required files:",paste(missing,collapse=", ")))
 
 # ---------------- REMOTE-SENSING DATA -------------------------
-rgb_image <- rast(paths[["rgb"]]); ms_image <- rast(paths[["ms"]]); hyper_image <- rast(paths[["hyper"]])
+rgb_image <- terra::rast(paths[["rgb"]])
+ms_image <- terra::rast(paths[["ms"]])
+hyper_image <- terra::rast(paths[["hyper"]])
+
+# A non-geospatial hyperspectral image may not contain a valid map extent.
+# Assign pixel coordinates so plot clicking and terra::extract() still work.
+hyper_extent_values <- as.numeric(terra::ext(hyper_image))
+if (
+  length(hyper_extent_values) != 4 ||
+  any(!is.finite(hyper_extent_values)) ||
+  hyper_extent_values[1] == hyper_extent_values[2] ||
+  hyper_extent_values[3] == hyper_extent_values[4]
+) {
+  terra::ext(hyper_image) <- terra::ext(
+    0, terra::ncol(hyper_image),
+    0, terra::nrow(hyper_image)
+  )
+}
 if(nlyr(rgb_image)<3) stop("rgb_image.tif requires at least three bands.")
 if(nlyr(ms_image)<5) stop("multispectral_image.tif requires at least five bands.")
 ms_bands <- c(Blue=1,Green=2,Red=3,RedEdge=4,NIR=5)
@@ -89,7 +105,7 @@ questions <- list(
 clean_name <- function(x) gsub("\\s+"," ",trimws(x)); normalize_name<-function(x) gsub("\\s+","",tolower(trimws(x)))
 request_id <- function() paste(format(Sys.time(),"%Y%m%d%H%M%OS6",tz="UTC"),Sys.getpid(),sample.int(1e9,1),sep="-")
 safe_ratio <- function(a,b) if(!is.finite(b)||abs(b)<.Machine$double.eps) NA_real_ else a/b
-feature_to_sf <- function(feature){if(is.null(feature)||is.null(feature$geometry))return(NULL);st_read(toJSON(list(type="FeatureCollection",features=list(feature)),auto_unbox=TRUE),quiet=TRUE)}
+feature_to_sf <- function(feature){if(is.null(feature)||is.null(feature$geometry))return(NULL);sf::st_read(jsonlite::toJSON(list(type="FeatureCollection",features=list(feature)),auto_unbox=TRUE),quiet=TRUE)}
 result_columns <- c("Time","Student","Module","Question_ID","Activity","Question","Answer","Correct","Clicked_X","Clicked_Y","Values","Expected")
 empty_results <- function() as.data.frame(setNames(replicate(length(result_columns),character(0),simplify=FALSE),result_columns),stringsAsFactors=FALSE)
 
@@ -124,7 +140,61 @@ server <- function(input,output,session){
  output$rs_image<-renderPlot({if(type()=="RS_GLI")plotRGB(rgb_image,1,2,3,stretch="lin",axes=FALSE);if(type()=="RS_NDVI")plotRGB(ms_image,5,3,2,stretch="lin",axes=FALSE);if(type()=="RS_HYPER")plotRGB(hyper_image,hyper_rgb[["R"]],hyper_rgb[["G"]],hyper_rgb[["B"]],stretch="lin",axes=FALSE);if(is.finite(rs_x()))points(rs_x(),rs_y(),pch=21,bg="red",col="yellow",cex=2)},res=100)
  observeEvent(input$rs_click,{xy<-matrix(c(input$rs_click$x,input$rs_click$y),ncol=2);if(type()=="RS_GLI"){v<-as.numeric(extract(rgb_image,xy)[1,1:3]);rgb_vals(v);expected_index(safe_ratio(2*v[2]-v[1]-v[3],2*v[2]+v[1]+v[3]))};if(type()=="RS_NDVI"){v<-as.numeric(extract(ms_image,xy)[1,1:5]);ms_vals(v);expected_index(safe_ratio(v[5]-v[3],v[5]+v[3]))};if(type()=="RS_HYPER"){v<-as.numeric(extract(hyper_image,xy)[1,seq_len(nlyr(hyper_image))]);sp<-data.frame(Wavelength_nm=hyper_wavelengths,Reflectance=v);if(input$spectral_target=="vegetation"){veg_spectrum(sp);updateRadioButtons(session,"spectral_target",selected="soil")}else soil_spectrum(sp)};rs_x(input$rs_click$x);rs_y(input$rs_click$y)},ignoreInit=TRUE)
  output$rs_status<-renderUI({if(type()=="RS_GLI"){v<-rgb_vals();if(is.null(v))return(div(class="metric","Click vegetation."));div(class="metric",paste("R:",round(v[1],3),"G:",round(v[2],3),"B:",round(v[3],3),"GLI:",round(expected_index(),3)))}else if(type()=="RS_NDVI"){v<-ms_vals();if(is.null(v))return(div(class="metric","Click vegetation."));div(class="metric",paste("Red:",round(v[3],3),"NIR:",round(v[5],3),"NDVI:",round(expected_index(),3)))}else div(class="metric","Select vegetation and soil pixels.")})
- output$spectral_plot<-renderPlotly({validate(need(!is.null(veg_spectrum())||!is.null(soil_spectrum()),"Click a target."));p<-plot_ly();if(!is.null(veg_spectrum()))p<-add_trace(p,data=veg_spectrum(),x=~Wavelength_nm,y=~Reflectance,type="scatter",mode="lines",name="Vegetation");if(!is.null(soil_spectrum()))p<-add_trace(p,data=soil_spectrum(),x=~Wavelength_nm,y=~Reflectance,type="scatter",mode="lines",name="Soil");layout(p,xaxis=list(title="Wavelength (nm)"),yaxis=list(title="Reflectance"))})
+ output$spectral_plot <- renderPlotly({
+   vegetation_data <- veg_spectrum()
+   soil_data <- soil_spectrum()
+
+   shiny::validate(
+     shiny::need(
+       !is.null(vegetation_data) || !is.null(soil_data),
+       "Select Vegetation or Soil, then click a target in the image."
+     )
+   )
+
+   if (!is.null(vegetation_data)) {
+     p <- plotly::plot_ly(
+       data = vegetation_data,
+       x = ~Wavelength_nm,
+       y = ~Reflectance,
+       type = "scatter",
+       mode = "lines",
+       name = "Vegetation",
+       line = list(color = "#198754", width = 3)
+     )
+   } else {
+     p <- plotly::plot_ly(
+       data = soil_data,
+       x = ~Wavelength_nm,
+       y = ~Reflectance,
+       type = "scatter",
+       mode = "lines",
+       name = "Soil",
+       line = list(color = "#9a6b3f", width = 3)
+     )
+   }
+
+   if (!is.null(vegetation_data) && !is.null(soil_data)) {
+     p <- plotly::add_trace(
+       p,
+       data = soil_data,
+       x = ~Wavelength_nm,
+       y = ~Reflectance,
+       type = "scatter",
+       mode = "lines",
+       name = "Soil",
+       line = list(color = "#9a6b3f", width = 3)
+     )
+   }
+
+   plotly::layout(
+     p,
+     title = list(text = "Vegetation and Soil Spectral Signatures"),
+     hovermode = "x unified",
+     xaxis = list(title = "Wavelength (nm)"),
+     yaxis = list(title = "Reflectance"),
+     legend = list(orientation = "h", x = 0, y = 1.1)
+   )
+ })
  output$spectral_values<-renderUI(div(class="metric",paste("Vegetation:",if(is.null(veg_spectrum()))"not selected"else"selected","| Soil:",if(is.null(soil_spectrum()))"not selected"else"selected")))
  output$spatial_preview<-renderPlot({if(input$spatial_image=="RGB")plotRGB(rgb_image,1,2,3,stretch="lin",axes=FALSE);if(input$spatial_image=="Multispectral")plotRGB(ms_image,3,2,1,stretch="lin",axes=FALSE);if(input$spatial_image=="Hyperspectral")plotRGB(hyper_image,hyper_rgb[["R"]],hyper_rgb[["G"]],hyper_rgb[["B"]],stretch="lin",axes=FALSE)})
  output$spatial_cards<-renderUI(fluidRow(lapply(names(spatial_resolution_cm),function(n)column(4,div(class="metric",h4(n),p(paste(spatial_resolution_cm[[n]],"cm/pixel")),p(paste(pixel_area_cm2[[n]],"cm2/pixel")))))))
@@ -134,7 +204,69 @@ server <- function(input,output,session){
  output$composite_status<-renderUI(div(class="metric",paste("True:",if(is.null(saved_true()))"not saved"else paste(saved_true(),collapse="/")),br(),paste("False:",if(is.null(saved_false()))"not saved"else paste(saved_false(),collapse="/"))))
 
  output$map_help<-renderUI(div(strong("Instructions: "),switch(type(),GIS_POINT="Place one marker inside the green field.",GIS_AREA="Trace the green field boundary.",GIS_DISTANCE="Place exactly two markers.",GIS_LINE="Draw one polyline.",GIS_QUERY="Run the fixed attribute query.","")))
- output$gis_map<-renderLeaflet({req(started(),output$has_gis_map());t<-type();if(t=="GIS_QUERY")return(leaflet()|>addProviderTiles(providers$Esri.WorldImagery)|>addPolygons(data=field_map,group="All plots",color="#64748b",weight=.35,fillColor="#8ecae6",fillOpacity=.25,popup=~paste0("Plot: ",plot_id,"<br>Canopy: ",round(Canopy_Cov,2),"<br>NDVI: ",round(NDVI,3)))|>fitBounds(field_bbox[["xmin"]],field_bbox[["ymin"]],field_bbox[["xmax"]],field_bbox[["ymax"]]));leaflet()|>addProviderTiles(providers$Esri.WorldImagery)|>setView(map_center[["lng"]],map_center[["lat"]],16)|>addPolygons(data=training_field,color="#00ff7f",weight=4,fillOpacity=.08)|>addDrawToolbar(targetGroup="drawn",polylineOptions=if(t=="GIS_LINE")drawPolylineOptions()else FALSE,circleOptions=FALSE,rectangleOptions=FALSE,circleMarkerOptions=FALSE,markerOptions=if(t%in%c("GIS_POINT","GIS_DISTANCE"))drawMarkerOptions()else FALSE,polygonOptions=if(t=="GIS_AREA")drawPolygonOptions(showArea=TRUE)else FALSE)})
+ output$gis_map <- renderLeaflet({
+   req(started())
+   t <- type()
+   req(t %in% c("GIS_POINT", "GIS_AREA", "GIS_DISTANCE", "GIS_LINE", "GIS_QUERY"))
+
+   if (t == "GIS_QUERY") {
+     return(
+       leaflet(options = leafletOptions(preferCanvas = TRUE)) |>
+         addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") |>
+         addProviderTiles(providers$OpenStreetMap, group = "OpenStreetMap") |>
+         addPolygons(
+           data = field_map,
+           group = "All plots",
+           color = "#64748b",
+           weight = 0.35,
+           fillColor = "#8ecae6",
+           fillOpacity = 0.25,
+           popup = ~paste0(
+             "<b>Plot:</b> ", plot_id,
+             "<br><b>Canopy:</b> ", round(Canopy_Cov, 2), "%",
+             "<br><b>NDVI:</b> ", round(NDVI, 3)
+           )
+         ) |>
+         fitBounds(
+           field_bbox[["xmin"]], field_bbox[["ymin"]],
+           field_bbox[["xmax"]], field_bbox[["ymax"]]
+         )
+     )
+   }
+
+   leaflet(options = leafletOptions(minZoom = 14)) |>
+     addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") |>
+     addProviderTiles(providers$OpenStreetMap, group = "OpenStreetMap") |>
+     setView(map_center[["lng"]], map_center[["lat"]], 16) |>
+     addPolygons(
+       data = training_field,
+       color = "#00ff7f",
+       weight = 4,
+       fillColor = "#00ff7f",
+       fillOpacity = 0.08,
+       label = "Highlighted training field",
+       group = "Training field"
+     ) |>
+     addDrawToolbar(
+       targetGroup = "drawn",
+       polylineOptions = if (t == "GIS_LINE") {
+         drawPolylineOptions(shapeOptions = drawShapeOptions(color = "#2563eb", weight = 5))
+       } else FALSE,
+       circleOptions = FALSE,
+       rectangleOptions = FALSE,
+       circleMarkerOptions = FALSE,
+       markerOptions = if (t %in% c("GIS_POINT", "GIS_DISTANCE")) drawMarkerOptions() else FALSE,
+       polygonOptions = if (t == "GIS_AREA") {
+         drawPolygonOptions(showArea = TRUE, shapeOptions = drawShapeOptions(color = "#ff7a00"))
+       } else FALSE,
+       editOptions = editToolbarOptions(selectedPathOptions = selectedPathOptions())
+     ) |>
+     addLayersControl(
+       baseGroups = c("Satellite", "OpenStreetMap"),
+       overlayGroups = c("Training field", "drawn"),
+       options = layersControlOptions(collapsed = FALSE)
+     )
+ })
  observeEvent(input$gis_map_draw_new_feature,{s<-tryCatch(feature_to_sf(input$gis_map_draw_new_feature),error=function(e)NULL);if(is.null(s))return();st_crs(s)<-4326;cur<-features();if(type()=="GIS_POINT"){cur<-list(s);leafletProxy("gis_map")|>clearGroup("drawn")|>addMarkers(data=s,group="drawn")};if(type()=="GIS_AREA"){cur<-list(s);a<-as.numeric(st_area(st_transform(s,calculation_crs)))/10000;calc_area(a);updateNumericInput(session,"area_answer",value=round(a,3))};if(type()=="GIS_DISTANCE"){cur<-c(cur,list(s));if(length(cur)>2)cur<-tail(cur,2);if(length(cur)==2){p<-do.call(rbind,cur)|>st_transform(calculation_crs);d<-as.numeric(st_distance(p[1,],p[2,]));calc_distance(d);updateNumericInput(session,"distance_answer",value=round(d,2))}};if(type()=="GIS_LINE"){cur<-list(s);m<-as.numeric(st_length(st_transform(s,calculation_crs)));calc_line(m);updateNumericInput(session,"line_answer",value=round(m,2))};features(cur)},ignoreInit=TRUE)
  output$map_status<-renderUI({if(type()=="GIS_POINT")div(class="metric",paste("Points:",length(features()),"/1"))else if(type()=="GIS_AREA")div(class="metric",paste("Area:",ifelse(is.finite(calc_area()),round(calc_area(),3),"not drawn"),"ha"))else if(type()=="GIS_DISTANCE")div(class="metric",paste("Points:",length(features()),"/2 | Distance:",ifelse(is.finite(calc_distance()),round(calc_distance(),2),"NA")))else if(type()=="GIS_LINE")div(class="metric",paste("Length:",ifelse(is.finite(calc_line()),round(calc_line(),2),"NA"),"m"))else NULL})
  observeEvent(input$run_query,{query_ran(TRUE);leafletProxy("gis_map")|>clearGroup("Query")|>addPolygons(data=field_map[query_flag,],group="Query",color="#ff006e",weight=2.5,fillColor="#ffbe0b",fillOpacity=.9)},ignoreInit=TRUE)
