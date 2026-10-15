@@ -1,776 +1,161 @@
-# Remote Sensing and High-Throughput Phenotyping
-# Interactive Shiny lecture with 10 questions
-# Local in-memory results only. No Google Sheets or credentials required.
+# ============================================================
+# REMOTE SENSING + GIS INTERACTIVE SHINY LECTURE
+# 20 questions: 10 Remote Sensing + 10 GIS
+# Local, session-specific data frame. No Google Sheets required.
+# ============================================================
 
 library(shiny)
 library(shinyjs)
 library(plotly)
 library(terra)
+library(leaflet)
+library(leaflet.extras)
+library(sf)
+library(jsonlite)
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
-course_id <- Sys.getenv("HTP_COURSE_ID", unset = "HTP_DEFAULT")
-
-required_columns <- c(
-  "Time", "Course_ID", "Student_ID", "Student", "Question_ID",
-  "Activity", "Question", "Answer", "Correct", "Request_ID",
-  "Submission_Key", "Clicked_X", "Clicked_Y", "Red_Value",
-  "Green_Value", "Blue_Value", "NIR_Value", "Expected_Index"
-)
-
-empty_results <- function() {
-  as.data.frame(
-    setNames(
-      replicate(length(required_columns), character(0), simplify = FALSE),
-      required_columns
-    ),
-    stringsAsFactors = FALSE
-  )
-}
-
-# ============================================================
-# IMAGE DATA
-# ============================================================
+# ------------------------- FILES ------------------------------
 image_dir <- file.path(getwd(), "image")
 paths <- c(
-  rgb = file.path(image_dir, "rgb_image.tif"),
-  ms = file.path(image_dir, "multispectral_image.tif"),
-  hyper = file.path(image_dir, "hyper.tif"),
-  wavelengths = file.path(image_dir, "wavelengths.csv")
+  rgb=file.path(image_dir,"rgb_image.tif"),
+  ms=file.path(image_dir,"multispectral_image.tif"),
+  hyper=file.path(image_dir,"hyper.tif"),
+  wavelengths=file.path(image_dir,"wavelengths.csv"),
+  field=file.path(getwd(),"field.geojson")
 )
+missing <- paths[!file.exists(paths)]
+if(length(missing)) stop(paste("Missing required files:",paste(missing,collapse=", ")))
 
-missing_files <- paths[!file.exists(paths)]
-if (length(missing_files) > 0) {
-  stop(
-    paste(
-      "Missing required file(s):",
-      paste(missing_files, collapse = ", ")
-    )
-  )
-}
-
-rgb_image <- rast(paths[["rgb"]])
-ms_image <- rast(paths[["ms"]])
-hyper_image <- rast(paths[["hyper"]])
-
-if (nlyr(rgb_image) < 3) stop("rgb_image.tif must contain at least three bands.")
-if (nlyr(ms_image) < 5) stop("multispectral_image.tif must contain at least five bands.")
-
-rgb_bands <- c(Red = 1, Green = 2, Blue = 3)
-ms_bands <- c(Blue = 1, Green = 2, Red = 3, RedEdge = 4, NIR = 5)
-
-wavelength_table <- read.csv(paths[["wavelengths"]], stringsAsFactors = FALSE)
-if (!"wavelength_nm" %in% names(wavelength_table)) {
-  stop("wavelengths.csv must contain a wavelength_nm column.")
-}
-
+# ---------------- REMOTE-SENSING DATA -------------------------
+rgb_image <- rast(paths[["rgb"]]); ms_image <- rast(paths[["ms"]]); hyper_image <- rast(paths[["hyper"]])
+if(nlyr(rgb_image)<3) stop("rgb_image.tif requires at least three bands.")
+if(nlyr(ms_image)<5) stop("multispectral_image.tif requires at least five bands.")
+ms_bands <- c(Blue=1,Green=2,Red=3,RedEdge=4,NIR=5)
+wavelength_table <- read.csv(paths[["wavelengths"]],stringsAsFactors=FALSE)
+if(!"wavelength_nm"%in%names(wavelength_table)) stop("wavelengths.csv requires wavelength_nm.")
 hyper_wavelengths <- as.numeric(wavelength_table$wavelength_nm)
-if (length(hyper_wavelengths) != nlyr(hyper_image)) {
-  stop("The wavelength count does not match the hyperspectral band count.")
-}
-
-nearest_band <- function(wavelengths, target) {
-  which.min(abs(wavelengths - target))
-}
-
-hyper_rgb_bands <- c(
-  Red = nearest_band(hyper_wavelengths, 650),
-  Green = nearest_band(hyper_wavelengths, 550),
-  Blue = nearest_band(hyper_wavelengths, 475)
-)
-
-target_wavelengths <- c(Green = 550, NIR = 800)
-target_bands <- vapply(
-  target_wavelengths,
-  function(target) nearest_band(hyper_wavelengths, target),
-  integer(1)
-)
-actual_target_wavelengths <- hyper_wavelengths[target_bands]
-names(actual_target_wavelengths) <- names(target_wavelengths)
-
-spatial_resolution_cm <- c(RGB = 1, Multispectral = 2, Hyperspectral = 25)
+if(length(hyper_wavelengths)!=nlyr(hyper_image)) stop("Wavelength count does not match hyperspectral bands.")
+nearest_band <- function(target) which.min(abs(hyper_wavelengths-target))
+hyper_rgb <- c(R=nearest_band(650),G=nearest_band(550),B=nearest_band(475))
+hyper_targets <- c(Green=nearest_band(550),NIR=nearest_band(800))
+spatial_resolution_cm <- c(RGB=1,Multispectral=2,Hyperspectral=25)
 pixel_area_cm2 <- spatial_resolution_cm^2
+band_choices <- c("Blue band"="Blue","Green band"="Green","Red band"="Red","Red-edge band"="RedEdge","Near-infrared band"="NIR")
+true_assignment <- c(Red="Red",Green="Green",Blue="Blue")
+false_assignment <- c(Red="NIR",Green="Red",Blue="Green")
 
-band_choices <- c(
-  "Blue band" = "Blue",
-  "Green band" = "Green",
-  "Red band" = "Red",
-  "Red-edge band" = "RedEdge",
-  "Near-infrared band" = "NIR"
-)
+# ------------------------- GIS DATA ---------------------------
+field_raw <- st_read(paths[["field"]],quiet=TRUE,stringsAsFactors=FALSE)
+needed <- c("plot_id","Canopy_Cov","NDVI")
+if(length(setdiff(needed,names(field_raw)))) stop("field.geojson requires plot_id, Canopy_Cov, and NDVI.")
+if(is.na(st_crs(field_raw))) st_crs(field_raw)<-32615
+field_utm <- st_transform(st_make_valid(field_raw),32615)
+field_utm$plot_id<-as.character(field_utm$plot_id); field_utm$Canopy_Cov<-as.numeric(field_utm$Canopy_Cov); field_utm$NDVI<-as.numeric(field_utm$NDVI)
+field_map <- st_transform(field_utm,4326); field_bbox<-st_bbox(field_map)
+query_flag <- is.finite(field_utm$Canopy_Cov)&is.finite(field_utm$NDVI)&field_utm$Canopy_Cov>80&field_utm$NDVI>0.772
+query_count_expected <- sum(query_flag)
+map_center <- c(lng=-96.3430,lat=30.6187); calculation_crs<-32614
+make_rectangle <- function(xmin,ymin,xmax,ymax) st_polygon(list(matrix(c(xmin,ymin,xmax,ymin,xmax,ymax,xmin,ymax,xmin,ymin),ncol=2,byrow=TRUE)))
+training_field <- st_sf(Name="Training field",geometry=st_sfc(make_rectangle(-96.3474,30.6162,-96.3387,30.6220),crs=4326))
+target_area_ha <- as.numeric(st_area(st_transform(training_field,calculation_crs)))/10000
 
-true_assignment <- c(Red = "Red", Green = "Green", Blue = "Blue")
-false_assignment <- c(Red = "NIR", Green = "Red", Blue = "Green")
-
-# ============================================================
-# QUESTIONS: EXACTLY 10
-# ============================================================
+# ------------------------- QUESTIONS --------------------------
+Q <- function(module,activity,question,type="MC",choices=NULL,values=NULL,correct=NULL,explanation="",image="NONE",tolerance=NA_real_) 
+  list(module=module,activity=activity,question=question,type=type,choices=choices,values=values,correct=correct,explanation=explanation,image=image,tolerance=tolerance)
 questions <- list(
-  list(
-    activity = "Remote Sensing",
-    question = "Which activity uses remote sensing?",
-    choices = c(
-      "Measuring stem diameter",
-      "Estimating canopy cover from a UAV RGB image",
-      "Weighing biomass",
-      "Measuring plant height"
-    ),
-    values = c("A", "B", "C", "D"),
-    correct = "B",
-    explanation = "UAV imaging collects information without touching the plants."
-  ),
-  list(
-    activity = "Active and Passive Sensing",
-    question = "Which statement is correct?",
-    choices = c(
-      "Passive sensors detect naturally available energy",
-      "Active sensors detect only sunlight",
-      "Both types of sensors transmit energy",
-      "LiDAR is passive"
-    ),
-    values = c("A", "B", "C", "D"),
-    correct = "A",
-    explanation = "LiDAR and radar are active, while optical cameras are commonly passive."
-  ),
-  list(
-    activity = "Spectral Signature",
-    question = "What is a spectral signature?",
-    choices = c("GPS position", "Response across wavelengths", "Plant height", "Leaf count"),
-    values = c("A", "B", "C", "D"),
-    correct = "B",
-    explanation = "A spectral signature describes wavelength-dependent reflectance or emission."
-  ),
-  list(
-    activity = "Electromagnetic Spectrum",
-    question = "Which relationship is correct?",
-    choices = c(
-      "Wavelength and energy are inversely related",
-      "They always increase together",
-      "All wavelengths have equal energy",
-      "Visible light is the entire spectrum"
-    ),
-    values = c("A", "B", "C", "D"),
-    correct = "A",
-    explanation = "Wavelength and energy are inversely related, and shorter wavelengths carry more photon energy."
-  ),
-  list(
-    activity = "Vegetation Spectral Response",
-    question = "Why is healthy vegetation commonly brighter in NIR than in red?",
-    choices = c(
-      "Chlorophyll strongly absorbs red light, while internal leaf structure strongly reflects NIR",
-      "Vegetation absorbs all NIR",
-      "Only soil controls NIR",
-      "Red and NIR are identical"
-    ),
-    values = c("A", "B", "C", "D"),
-    correct = "A",
-    explanation = "Chlorophyll absorbs red energy while internal leaf structure scatters NIR energy."
-  ),
-  list(
-    activity = "Interactive Spatial Resolution",
-    question = "Compare the three images and select the image with the finest spatial detail.",
-    question_type = "SPATIAL_RESOLUTION",
-    image_type = "NONE",
-    explanation = "Smaller centimeters per pixel means finer spatial detail."
-  ),
-  list(
-    activity = "Multispectral Color Composites",
-    question = "Create and save a true-color composite and a color-infrared false-color composite.",
-    question_type = "BAND_ASSIGNMENT",
-    image_type = "NONE",
-    explanation = "True color uses Red/Green/Blue. Color infrared uses NIR/Red/Green."
-  ),
-  list(
-    activity = "RGB Pixel Investigation",
-    question = "Click a vegetation pixel. The application will calculate the Green Leaf Index automatically.",
-    question_type = "NUMERIC_GLI",
-    image_type = "RGB",
-    formula = "GLI = (2 x Green - Red - Blue) / (2 x Green + Red + Blue)",
-    explanation = "Positive GLI values are generally associated with green vegetation."
-  ),
-  list(
-    activity = "Multispectral Pixel Investigation",
-    question = "Click a vegetation pixel. The application will calculate NDVI automatically.",
-    question_type = "NUMERIC_NDVI",
-    image_type = "MS",
-    formula = "NDVI = (NIR - Red) / (NIR + Red)",
-    explanation = "Healthy vegetation commonly reflects more NIR and absorbs more red energy."
-  ),
-  list(
-    activity = "Hyperspectral Signatures",
-    question = "Select vegetation and soil pixels to compare their spectral signatures.",
-    question_type = "SPECTRAL_BANDS",
-    image_type = "HYPER",
-    explanation = "Vegetation and soil differ because of pigments, internal structure, moisture, and surface texture."
-  )
+ Q("Remote Sensing","Remote Sensing","Which activity uses remote sensing?","MC",c("Measuring stem diameter","Estimating canopy cover from a UAV RGB image","Weighing biomass","Measuring plant height"),c("A","B","C","D"),"B","UAV imaging collects information without touching plants."),
+ Q("Remote Sensing","Active and Passive Sensing","Which statement is correct?","MC",c("Passive sensors detect naturally available energy","Active sensors detect only sunlight","Both types transmit energy","LiDAR is passive"),c("A","B","C","D"),"A","LiDAR and radar are active; optical cameras are commonly passive."),
+ Q("Remote Sensing","Spectral Signature","What is a spectral signature?","MC",c("GPS position","Response across wavelengths","Plant height","Leaf count"),c("A","B","C","D"),"B","A spectral signature is a target response across wavelengths."),
+ Q("Remote Sensing","Electromagnetic Spectrum","Which relationship is correct?","MC",c("Wavelength and energy are inversely related","They always increase together","All wavelengths have equal energy","Visible light is the entire spectrum"),c("A","B","C","D"),"A","Shorter wavelengths carry more photon energy."),
+ Q("Remote Sensing","Vegetation Spectral Response","Why is healthy vegetation commonly brighter in NIR than red?","MC",c("Chlorophyll absorbs red while leaf structure reflects NIR","Vegetation absorbs all NIR","Only soil controls NIR","Red and NIR are identical"),c("A","B","C","D"),"A","Chlorophyll absorbs red and internal leaf structure scatters NIR."),
+ Q("Remote Sensing","Spatial Resolution","Compare the images and select the finest spatial detail.","RS_SPATIAL",explanation="Smaller centimeters per pixel means finer detail."),
+ Q("Remote Sensing","Color Composites","Create and save true-color and color-infrared composites.","RS_COMPOSITE",explanation="True color is RGB; color infrared is NIR/Red/Green."),
+ Q("Remote Sensing","RGB Pixel Investigation","Click a vegetation pixel to calculate GLI.","RS_GLI",explanation="Positive GLI commonly indicates green vegetation.",image="RGB"),
+ Q("Remote Sensing","Multispectral Pixel Investigation","Click a vegetation pixel to calculate NDVI.","RS_NDVI",explanation="Healthy vegetation commonly reflects more NIR and absorbs more red.",image="MS"),
+ Q("Remote Sensing","Hyperspectral Signatures","Select vegetation and soil pixels to compare spectral signatures.","RS_HYPER",explanation="Vegetation and soil have different wavelength-dependent responses.",image="HYPER"),
+ Q("GIS","GIS Concept","What is the primary purpose of GIS?","MC",c("Only attractive maps","Capture, manage, analyze, and visualize geographically referenced data","Only GPS coordinates","Only store images"),c("A","B","C","D"),"B","GIS connects locations with attributes for management and spatial analysis."),
+ Q("GIS","Components of GIS","Which group represents the main components of GIS?","MC",c("Hardware, software, data, people, and methods","Maps and printers only","Raster and vector only","GPS and drones only"),c("A","B","C","D"),"A","GIS combines hardware, software, data, people, and methods."),
+ Q("GIS","Vector Data","Which vector geometries represent sampling sites, roads, and field boundaries?","MC",c("Cells, bands, and pixels","Points, lines, and polygons","Tables, rows, and columns","Latitude only"),c("A","B","C","D"),"B","Vector data use points, lines, and polygons."),
+ Q("GIS","Raster Data","How is geographic space represented in a raster dataset?","MC",c("Only polygons","Only GPS points","Text without locations","A regular grid of cells containing values"),c("A","B","C","D"),"D","Raster data represent geographic space as cells or pixels."),
+ Q("GIS","Spatial Relationships","Which GIS operation identifies features that cross, touch, or fall within other features?","MC",c("Changing colors","Renaming a field","Spatial query and relationship analysis","Exporting a screenshot"),c("A","B","C","D"),"C","Intersects, within, and touches are GIS spatial relationships."),
+ Q("GIS","Point Digitization","Digitize one sampling point inside the highlighted green field.","GIS_POINT",explanation="A sampling location is represented by point geometry."),
+ Q("GIS","Polygon Digitization and Area","Trace the highlighted green field and submit its area in hectares.","GIS_AREA",explanation="Polygon geometry supports area calculation.",tolerance=.15),
+ Q("GIS","Distance Calculation","Digitize exactly two sampling points and submit their distance in meters.","GIS_DISTANCE",explanation="GIS calculates distance from feature coordinates.",tolerance=.02),
+ Q("GIS","Line Digitization","Digitize one route and submit its length in meters.","GIS_LINE",explanation="A route is represented by line geometry.",tolerance=.02),
+ Q("GIS","Conditional Query","Highlight plots where Canopy_Cov > 80% and NDVI > 0.772, then submit the count.","GIS_QUERY",explanation="The query selects plots satisfying both attribute conditions.")
 )
 
-questions <- lapply(questions, function(question) {
-  if (is.null(question$question_type)) question$question_type <- "MULTIPLE_CHOICE"
-  if (is.null(question$image_type)) question$image_type <- "NONE"
-  if (is.null(question$formula)) question$formula <- ""
-  question
-})
+# ------------------------- HELPERS ----------------------------
+`%||%` <- function(x,y) if(is.null(x)||length(x)==0||all(is.na(x))||identical(x,"")) y else x
+clean_name <- function(x) gsub("\\s+"," ",trimws(x)); normalize_name<-function(x) gsub("\\s+","",tolower(trimws(x)))
+request_id <- function() paste(format(Sys.time(),"%Y%m%d%H%M%OS6",tz="UTC"),Sys.getpid(),sample.int(1e9,1),sep="-")
+safe_ratio <- function(a,b) if(!is.finite(b)||abs(b)<.Machine$double.eps) NA_real_ else a/b
+feature_to_sf <- function(feature){if(is.null(feature)||is.null(feature$geometry))return(NULL);st_read(toJSON(list(type="FeatureCollection",features=list(feature)),auto_unbox=TRUE),quiet=TRUE)}
+result_columns <- c("Time","Student","Module","Question_ID","Activity","Question","Answer","Correct","Clicked_X","Clicked_Y","Values","Expected")
+empty_results <- function() as.data.frame(setNames(replicate(length(result_columns),character(0),simplify=FALSE),result_columns),stringsAsFactors=FALSE)
 
-initial_choices <- setNames(questions[[1]]$values, questions[[1]]$choices)
+# ------------------------------ UI ----------------------------
+ui <- fluidPage(useShinyjs(),tags$head(tags$meta(name="viewport",content="width=device-width, initial-scale=1"),tags$style(HTML("
+body{background:linear-gradient(135deg,#eef5ff,#eefaf4);font-family:Inter,Arial;color:#1f2937}.shell{max-width:1200px;margin:auto;padding:22px}.card{background:white;border-radius:22px;padding:30px;margin-top:20px;box-shadow:0 15px 40px rgba(15,23,42,.1)}.title{font-size:36px;font-weight:800;color:#124c3c}.subtitle{color:#64748b;font-size:18px;margin-bottom:20px}.label{color:#0d6efd;font-size:13px;font-weight:800;letter-spacing:1px;text-transform:uppercase}.question{font-size:24px;font-weight:750;margin:12px 0 20px}.track{height:11px;border-radius:20px;background:#e2e8f0;overflow:hidden;margin:8px 0 20px}.fill{height:100%;background:linear-gradient(90deg,#0d6efd,#55c99a)}.box{background:#f8fafc;border:1px solid #dce3eb;border-radius:14px;padding:16px;margin:14px 0}.metric{background:white;border:1px solid #dce3eb;border-radius:12px;padding:13px;margin:8px 0}.buttons{display:flex;gap:12px;flex-wrap:wrap;margin-top:20px}.good{background:#ecfdf3;border-left:6px solid #198754;border-radius:12px;padding:16px;margin-top:20px}.bad{background:#fff1f2;border-left:6px solid #dc3545;border-radius:12px;padding:16px;margin-top:20px}.score{font-size:56px;color:#124c3c;font-weight:850}.leaflet-container{border-radius:12px}@media(max-width:700px){.shell{padding:8px}.card{padding:18px}.title{font-size:28px}.buttons .btn{width:100%}}
+"))),div(class="shell",
+ conditionalPanel("!output.started_screen && !output.finished_screen",div(class="card text-center",div(class="title","Remote Sensing and GIS for High-Throughput Phenotyping"),div(class="subtitle","Twenty guided questions: remote sensing concepts and imagery followed by GIS concepts and spatial activities."),div(style="max-width:520px;margin:20px auto;text-align:left",textInput("student_name","Student name",placeholder="Enter your full name")),actionButton("start","Start Combined Session",class="btn-primary btn-lg"))),
+ conditionalPanel("output.started_screen",div(class="card",div(strong("Student: "),textOutput("student_display",inline=TRUE)),textOutput("progress_text"),div(class="track",uiOutput("progress_bar")),div(class="label",textOutput("module_activity",inline=TRUE)),div(class="question",textOutput("question")),
+  conditionalPanel("output.is_mc",radioButtons("answer",NULL,choices=character(0),selected=character(0))),
+  conditionalPanel("output.has_rs_image",div(class="box",plotOutput("rs_image",height="480px",click="rs_click"),uiOutput("rs_status"))),
+  conditionalPanel("output.is_rs_spatial",div(class="box",selectInput("spatial_image","Image",c("RGB","Multispectral","Hyperspectral")),plotOutput("spatial_preview",height="380px"),uiOutput("spatial_cards"),selectInput("finest_image","Finest spatial detail",c("Select"="","RGB","Multispectral","Hyperspectral")))),
+  conditionalPanel("output.is_rs_composite",div(class="box",selectInput("composite_type","Composite",c("True color"="TRUE","Color infrared"="FALSE")),fluidRow(column(4,selectInput("display_red","Red channel",band_choices,"Red")),column(4,selectInput("display_green","Green channel",band_choices,"Green")),column(4,selectInput("display_blue","Blue channel",band_choices,"Blue"))),plotOutput("composite_preview",height="420px"),actionButton("save_composite","Save Composite",class="btn-info"),uiOutput("composite_status"))),
+  conditionalPanel("output.is_hyper",div(class="box",radioButtons("spectral_target","Target",c("Vegetation"="vegetation","Soil"="soil"),inline=TRUE),plotlyOutput("spectral_plot",height="400px"),uiOutput("spectral_values"))),
+  conditionalPanel("output.has_gis_map",div(class="box",uiOutput("map_help"),leafletOutput("gis_map",height="550px"),uiOutput("map_status"))),
+  conditionalPanel("output.is_area",numericInput("area_answer","Area (hectares)",NA,step=.001)),conditionalPanel("output.is_distance",numericInput("distance_answer","Distance (m)",NA,step=.01)),conditionalPanel("output.is_line",numericInput("line_answer","Line length (m)",NA,step=.01)),conditionalPanel("output.is_query",div(class="metric",actionButton("run_query","Run Query",class="btn-info"),numericInput("query_answer","Highlighted plot count",NA,min=0,step=1),uiOutput("query_status"))),
+  div(class="buttons",actionButton("submit","Submit Answer",class="btn-primary btn-lg"),actionButton("next_question","Next Question",class="btn-success btn-lg"),downloadButton("download_results","Download Results",class="btn-info btn-lg")),uiOutput("feedback"))),
+ conditionalPanel("output.finished_screen",div(class="card text-center",div(class="title","Combined Session Complete!"),div(class="subtitle","Student: ",textOutput("final_student",inline=TRUE)),div(class="score",textOutput("final_score",inline=TRUE)),div(class="subtitle",textOutput("final_percentage",inline=TRUE)),downloadButton("download_results_final","Download Results",class="btn-info btn-lg")))
+))
 
-# ============================================================
-# HELPERS
-# ============================================================
-`%||%` <- function(x, y) {
-  if (is.null(x) || length(x) == 0 || all(is.na(x)) || identical(x, "")) y else x
+# ---------------------------- SERVER --------------------------
+server <- function(input,output,session){
+ student<-reactiveVal(NULL);started<-reactiveVal(FALSE);finished<-reactiveVal(FALSE);qn<-reactiveVal(1);done<-reactiveVal(rep(FALSE,length(questions)));scores<-reactiveVal(rep(NA_integer_,length(questions)));feedback<-reactiveVal(NULL);results<-reactiveVal(empty_results())
+ rs_x<-reactiveVal(NA_real_);rs_y<-reactiveVal(NA_real_);rgb_vals<-reactiveVal(NULL);ms_vals<-reactiveVal(NULL);expected_index<-reactiveVal(NA_real_);veg_spectrum<-reactiveVal(NULL);soil_spectrum<-reactiveVal(NULL);saved_true<-reactiveVal(NULL);saved_false<-reactiveVal(NULL)
+ features<-reactiveVal(list());calc_area<-reactiveVal(NA_real_);calc_distance<-reactiveVal(NA_real_);calc_line<-reactiveVal(NA_real_);query_ran<-reactiveVal(FALSE)
+ q<-reactive(questions[[qn()]]);type<-reactive(q()$type)
+ output$started_screen<-reactive(started()&&!finished());output$finished_screen<-reactive(finished());output$is_mc<-reactive(type()=="MC");output$has_rs_image<-reactive(type()%in%c("RS_GLI","RS_NDVI","RS_HYPER"));output$is_rs_spatial<-reactive(type()=="RS_SPATIAL");output$is_rs_composite<-reactive(type()=="RS_COMPOSITE");output$is_hyper<-reactive(type()=="RS_HYPER");output$has_gis_map<-reactive(type()%in%c("GIS_POINT","GIS_AREA","GIS_DISTANCE","GIS_LINE","GIS_QUERY"));output$is_area<-reactive(type()=="GIS_AREA");output$is_distance<-reactive(type()=="GIS_DISTANCE");output$is_line<-reactive(type()=="GIS_LINE");output$is_query<-reactive(type()=="GIS_QUERY")
+ for(id in c("started_screen","finished_screen","is_mc","has_rs_image","is_rs_spatial","is_rs_composite","is_hyper","has_gis_map","is_area","is_distance","is_line","is_query"))outputOptions(output,id,suspendWhenHidden=FALSE)
+ output$student_display<-renderText(student());output$module_activity<-renderText(paste(q()$module,"|",q()$activity));output$question<-renderText(q()$question);output$progress_text<-renderText(paste("Question",qn(),"of",length(questions)));output$progress_bar<-renderUI(div(class="fill",style=paste0("width:",100*qn()/length(questions),"%")));output$feedback<-renderUI(feedback())
+ reset_q<-function(){feedback(NULL);rs_x(NA_real_);rs_y(NA_real_);rgb_vals(NULL);ms_vals(NULL);expected_index(NA_real_);veg_spectrum(NULL);soil_spectrum(NULL);saved_true(NULL);saved_false(NULL);features(list());calc_area(NA_real_);calc_distance(NA_real_);calc_line(NA_real_);query_ran(FALSE);updateNumericInput(session,"area_answer",value=NA);updateNumericInput(session,"distance_answer",value=NA);updateNumericInput(session,"line_answer",value=NA);updateNumericInput(session,"query_answer",value=NA);shinyjs::enable("submit");shinyjs::disable("next_question")}
+
+ output$rs_image<-renderPlot({if(type()=="RS_GLI")plotRGB(rgb_image,1,2,3,stretch="lin",axes=FALSE);if(type()=="RS_NDVI")plotRGB(ms_image,5,3,2,stretch="lin",axes=FALSE);if(type()=="RS_HYPER")plotRGB(hyper_image,hyper_rgb[["R"]],hyper_rgb[["G"]],hyper_rgb[["B"]],stretch="lin",axes=FALSE);if(is.finite(rs_x()))points(rs_x(),rs_y(),pch=21,bg="red",col="yellow",cex=2)},res=100)
+ observeEvent(input$rs_click,{xy<-matrix(c(input$rs_click$x,input$rs_click$y),ncol=2);if(type()=="RS_GLI"){v<-as.numeric(extract(rgb_image,xy)[1,1:3]);rgb_vals(v);expected_index(safe_ratio(2*v[2]-v[1]-v[3],2*v[2]+v[1]+v[3]))};if(type()=="RS_NDVI"){v<-as.numeric(extract(ms_image,xy)[1,1:5]);ms_vals(v);expected_index(safe_ratio(v[5]-v[3],v[5]+v[3]))};if(type()=="RS_HYPER"){v<-as.numeric(extract(hyper_image,xy)[1,seq_len(nlyr(hyper_image))]);sp<-data.frame(Wavelength_nm=hyper_wavelengths,Reflectance=v);if(input$spectral_target=="vegetation"){veg_spectrum(sp);updateRadioButtons(session,"spectral_target",selected="soil")}else soil_spectrum(sp)};rs_x(input$rs_click$x);rs_y(input$rs_click$y)},ignoreInit=TRUE)
+ output$rs_status<-renderUI({if(type()=="RS_GLI"){v<-rgb_vals();if(is.null(v))return(div(class="metric","Click vegetation."));div(class="metric",paste("R:",round(v[1],3),"G:",round(v[2],3),"B:",round(v[3],3),"GLI:",round(expected_index(),3)))}else if(type()=="RS_NDVI"){v<-ms_vals();if(is.null(v))return(div(class="metric","Click vegetation."));div(class="metric",paste("Red:",round(v[3],3),"NIR:",round(v[5],3),"NDVI:",round(expected_index(),3)))}else div(class="metric","Select vegetation and soil pixels.")})
+ output$spectral_plot<-renderPlotly({validate(need(!is.null(veg_spectrum())||!is.null(soil_spectrum()),"Click a target."));p<-plot_ly();if(!is.null(veg_spectrum()))p<-add_trace(p,data=veg_spectrum(),x=~Wavelength_nm,y=~Reflectance,type="scatter",mode="lines",name="Vegetation");if(!is.null(soil_spectrum()))p<-add_trace(p,data=soil_spectrum(),x=~Wavelength_nm,y=~Reflectance,type="scatter",mode="lines",name="Soil");layout(p,xaxis=list(title="Wavelength (nm)"),yaxis=list(title="Reflectance"))})
+ output$spectral_values<-renderUI(div(class="metric",paste("Vegetation:",if(is.null(veg_spectrum()))"not selected"else"selected","| Soil:",if(is.null(soil_spectrum()))"not selected"else"selected")))
+ output$spatial_preview<-renderPlot({if(input$spatial_image=="RGB")plotRGB(rgb_image,1,2,3,stretch="lin",axes=FALSE);if(input$spatial_image=="Multispectral")plotRGB(ms_image,3,2,1,stretch="lin",axes=FALSE);if(input$spatial_image=="Hyperspectral")plotRGB(hyper_image,hyper_rgb[["R"]],hyper_rgb[["G"]],hyper_rgb[["B"]],stretch="lin",axes=FALSE)})
+ output$spatial_cards<-renderUI(fluidRow(lapply(names(spatial_resolution_cm),function(n)column(4,div(class="metric",h4(n),p(paste(spatial_resolution_cm[[n]],"cm/pixel")),p(paste(pixel_area_cm2[[n]],"cm2/pixel")))))))
+ output$composite_preview<-renderPlot({plotRGB(ms_image,r=ms_bands[[input$display_red]],g=ms_bands[[input$display_green]],b=ms_bands[[input$display_blue]],stretch="lin",axes=FALSE)})
+ observeEvent(input$composite_type,{if(input$composite_type=="TRUE"){updateSelectInput(session,"display_red",selected="Red");updateSelectInput(session,"display_green",selected="Green");updateSelectInput(session,"display_blue",selected="Blue")}else{updateSelectInput(session,"display_red",selected="NIR");updateSelectInput(session,"display_green",selected="Red");updateSelectInput(session,"display_blue",selected="Green")}},ignoreInit=TRUE)
+ observeEvent(input$save_composite,{a<-c(Red=input$display_red,Green=input$display_green,Blue=input$display_blue);if(input$composite_type=="TRUE"){saved_true(a);updateSelectInput(session,"composite_type",selected="FALSE")}else saved_false(a)},ignoreInit=TRUE)
+ output$composite_status<-renderUI(div(class="metric",paste("True:",if(is.null(saved_true()))"not saved"else paste(saved_true(),collapse="/")),br(),paste("False:",if(is.null(saved_false()))"not saved"else paste(saved_false(),collapse="/"))))
+
+ output$map_help<-renderUI(div(strong("Instructions: "),switch(type(),GIS_POINT="Place one marker inside the green field.",GIS_AREA="Trace the green field boundary.",GIS_DISTANCE="Place exactly two markers.",GIS_LINE="Draw one polyline.",GIS_QUERY="Run the fixed attribute query.","")))
+ output$gis_map<-renderLeaflet({req(started(),output$has_gis_map());t<-type();if(t=="GIS_QUERY")return(leaflet()|>addProviderTiles(providers$Esri.WorldImagery)|>addPolygons(data=field_map,group="All plots",color="#64748b",weight=.35,fillColor="#8ecae6",fillOpacity=.25,popup=~paste0("Plot: ",plot_id,"<br>Canopy: ",round(Canopy_Cov,2),"<br>NDVI: ",round(NDVI,3)))|>fitBounds(field_bbox[["xmin"]],field_bbox[["ymin"]],field_bbox[["xmax"]],field_bbox[["ymax"]]));leaflet()|>addProviderTiles(providers$Esri.WorldImagery)|>setView(map_center[["lng"]],map_center[["lat"]],16)|>addPolygons(data=training_field,color="#00ff7f",weight=4,fillOpacity=.08)|>addDrawToolbar(targetGroup="drawn",polylineOptions=if(t=="GIS_LINE")drawPolylineOptions()else FALSE,circleOptions=FALSE,rectangleOptions=FALSE,circleMarkerOptions=FALSE,markerOptions=if(t%in%c("GIS_POINT","GIS_DISTANCE"))drawMarkerOptions()else FALSE,polygonOptions=if(t=="GIS_AREA")drawPolygonOptions(showArea=TRUE)else FALSE)})
+ observeEvent(input$gis_map_draw_new_feature,{s<-tryCatch(feature_to_sf(input$gis_map_draw_new_feature),error=function(e)NULL);if(is.null(s))return();st_crs(s)<-4326;cur<-features();if(type()=="GIS_POINT"){cur<-list(s);leafletProxy("gis_map")|>clearGroup("drawn")|>addMarkers(data=s,group="drawn")};if(type()=="GIS_AREA"){cur<-list(s);a<-as.numeric(st_area(st_transform(s,calculation_crs)))/10000;calc_area(a);updateNumericInput(session,"area_answer",value=round(a,3))};if(type()=="GIS_DISTANCE"){cur<-c(cur,list(s));if(length(cur)>2)cur<-tail(cur,2);if(length(cur)==2){p<-do.call(rbind,cur)|>st_transform(calculation_crs);d<-as.numeric(st_distance(p[1,],p[2,]));calc_distance(d);updateNumericInput(session,"distance_answer",value=round(d,2))}};if(type()=="GIS_LINE"){cur<-list(s);m<-as.numeric(st_length(st_transform(s,calculation_crs)));calc_line(m);updateNumericInput(session,"line_answer",value=round(m,2))};features(cur)},ignoreInit=TRUE)
+ output$map_status<-renderUI({if(type()=="GIS_POINT")div(class="metric",paste("Points:",length(features()),"/1"))else if(type()=="GIS_AREA")div(class="metric",paste("Area:",ifelse(is.finite(calc_area()),round(calc_area(),3),"not drawn"),"ha"))else if(type()=="GIS_DISTANCE")div(class="metric",paste("Points:",length(features()),"/2 | Distance:",ifelse(is.finite(calc_distance()),round(calc_distance(),2),"NA")))else if(type()=="GIS_LINE")div(class="metric",paste("Length:",ifelse(is.finite(calc_line()),round(calc_line(),2),"NA"),"m"))else NULL})
+ observeEvent(input$run_query,{query_ran(TRUE);leafletProxy("gis_map")|>clearGroup("Query")|>addPolygons(data=field_map[query_flag,],group="Query",color="#ff006e",weight=2.5,fillColor="#ffbe0b",fillOpacity=.9)},ignoreInit=TRUE)
+ output$query_status<-renderUI(if(query_ran())div(class="metric","Query completed. Count highlighted plots.")else"Query not run.")
+
+ observeEvent(input$start,{nm<-clean_name(input$student_name%||%"");if(!nzchar(nm))return(showNotification("Enter your name.",type="warning"));student(nm);started(TRUE);finished(FALSE);qn(1);done(rep(FALSE,length(questions)));scores(rep(NA_integer_,length(questions)));results(empty_results());updateRadioButtons(session,"answer",choices=setNames(questions[[1]]$values,questions[[1]]$choices),selected=character(0));reset_q()})
+ observeEvent(input$submit,{i<-qn();qq<-q();t<-type();if(done()[i])return();answer<-"";correct<-FALSE;expected<-"";vals<-""
+  if(t=="MC"){if(is.null(input$answer)||!nzchar(input$answer))return(showNotification("Select an answer.",type="warning"));answer<-input$answer;correct<-identical(answer,qq$correct);expected<-qq$correct}
+  if(t=="RS_SPATIAL"){if(!nzchar(input$finest_image))return(showNotification("Select the finest image.",type="warning"));answer<-input$finest_image;correct<-answer=="RGB";expected<-"RGB"}
+  if(t=="RS_COMPOSITE"){if(is.null(saved_true())||is.null(saved_false()))return(showNotification("Save both composites.",type="warning"));answer<-paste(paste(saved_true(),collapse="/"),paste(saved_false(),collapse="/"),sep="; ");correct<-identical(unname(saved_true()),unname(true_assignment))&&identical(unname(saved_false()),unname(false_assignment));expected<-"RGB; NIR/Red/Green"}
+  if(t%in%c("RS_GLI","RS_NDVI")){if(!is.finite(expected_index()))return(showNotification("Click a pixel.",type="warning"));answer<-round(expected_index(),3);correct<-TRUE;expected<-answer;vals<-if(t=="RS_GLI")paste(rgb_vals(),collapse="|")else paste(ms_vals(),collapse="|")}
+  if(t=="RS_HYPER"){if(is.null(veg_spectrum())||is.null(soil_spectrum()))return(showNotification("Select vegetation and soil.",type="warning"));answer<-"Vegetation and soil spectra selected";correct<-TRUE;expected<-"Both selected"}
+  if(t=="GIS_POINT"){if(length(features())!=1)return(showNotification("Digitize one point.",type="warning"));p<-st_transform(features()[[1]],calculation_crs);tf<-st_transform(training_field,calculation_crs);correct<-lengths(st_intersects(p,tf))[[1]]>0;answer<-"Digitized point";expected<-"Point inside green field"}
+  if(t=="GIS_AREA"){if(length(features())!=1||!is.finite(input$area_answer))return(showNotification("Draw polygon and enter area.",type="warning"));answer<-input$area_answer;correct<-abs(input$area_answer-calc_area())<=max(.01,.02*calc_area())&&abs(calc_area()-target_area_ha)<=qq$tolerance*target_area_ha;expected<-round(target_area_ha,3)}
+  if(t=="GIS_DISTANCE"){if(length(features())!=2||!is.finite(input$distance_answer))return(showNotification("Digitize two points.",type="warning"));answer<-input$distance_answer;correct<-abs(input$distance_answer-calc_distance())<=max(.5,qq$tolerance*calc_distance());expected<-round(calc_distance(),2)}
+  if(t=="GIS_LINE"){if(length(features())!=1||!is.finite(input$line_answer))return(showNotification("Digitize one line.",type="warning"));answer<-input$line_answer;correct<-abs(input$line_answer-calc_line())<=max(.5,qq$tolerance*calc_line());expected<-round(calc_line(),2)}
+  if(t=="GIS_QUERY"){if(!query_ran()||!is.finite(input$query_answer))return(showNotification("Run query and enter count.",type="warning"));answer<-input$query_answer;correct<-as.integer(answer)==query_count_expected;expected<-query_count_expected}
+  row<-data.frame(Time=format(Sys.time(),"%Y-%m-%d %H:%M:%S",tz="UTC"),Student=student(),Module=qq$module,Question_ID=paste0("Q",i),Activity=qq$activity,Question=qq$question,Answer=as.character(answer),Correct=if(correct)"TRUE"else"FALSE",Clicked_X=ifelse(is.finite(rs_x()),rs_x(),NA),Clicked_Y=ifelse(is.finite(rs_y()),rs_y(),NA),Values=vals,Expected=as.character(expected),stringsAsFactors=FALSE)[result_columns];results(rbind(results(),row));d<-done();d[i]<-TRUE;done(d);s<-scores();s[i]<-if(correct)1L else 0L;scores(s);feedback(if(correct)div(class="good",h4("Correct!"),p(qq$explanation))else div(class="bad",h4("Incorrect"),p(paste("Expected:",expected)),p(qq$explanation)));shinyjs::disable("submit");shinyjs::enable("next_question")
+ },ignoreInit=TRUE)
+ observeEvent(input$next_question,{if(!done()[qn()])return();if(qn()>=length(questions)){started(FALSE);finished(TRUE);feedback(NULL);return()};qn(qn()+1);reset_q();if(type()=="MC")updateRadioButtons(session,"answer",choices=setNames(q()$values,q()$choices),selected=character(0))},ignoreInit=TRUE)
+ output$final_student<-renderText(student());output$final_score<-renderText(paste0(sum(scores(),na.rm=TRUE)," / ",length(questions)));output$final_percentage<-renderText(paste0(round(100*sum(scores(),na.rm=TRUE)/length(questions),1),"%"))
+ download_content<-function(file)write.csv(results(),file,row.names=FALSE,na="");output$download_results<-downloadHandler(filename=function()paste0("RS_GIS_results_",normalize_name(student()%||%"student"),".csv"),content=download_content);output$download_results_final<-downloadHandler(filename=function()paste0("RS_GIS_results_",normalize_name(student()%||%"student"),".csv"),content=download_content)
 }
-
-clean_name <- function(x) gsub("\\s+", " ", trimws(x))
-normalize_name <- function(x) gsub("\\s+", "", tolower(trimws(x)))
-
-new_request_id <- function() {
-  paste(
-    format(Sys.time(), "%Y%m%d%H%M%OS6", tz = "UTC"),
-    Sys.getpid(),
-    sample.int(1e9, 1),
-    sep = "-"
-  )
-}
-
-safe_ratio <- function(numerator, denominator) {
-  if (!is.finite(denominator) || abs(denominator) < .Machine$double.eps) {
-    return(NA_real_)
-  }
-  numerator / denominator
-}
-
-interpret_index <- function(index_name, value) {
-  if (!is.finite(value)) return("No valid result is available.")
-
-  if (index_name == "GLI") {
-    if (value > 0.20) return("Strong green vegetation signal.")
-    if (value > 0.00) return("Positive green vegetation signal.")
-    return("Weak vegetation signal or a non-green target.")
-  }
-
-  if (index_name == "NDVI") {
-    if (value >= 0.60) return("Strong vegetation response.")
-    if (value >= 0.30) return("Moderate vegetation response.")
-    if (value >= 0.10) return("Low vegetation response or sparse canopy.")
-    return("Likely soil, residue, shadow, water, or another non-vegetation target.")
-  }
-
-  ""
-}
-
-# ============================================================
-# USER INTERFACE
-# ============================================================
-ui <- fluidPage(
-  useShinyjs(),
-  tags$head(
-    tags$meta(name = "viewport", content = "width=device-width, initial-scale=1"),
-    tags$style(HTML("
-      body { background: linear-gradient(135deg,#eef5ff,#f7fafc); font-family:Inter,Arial,sans-serif; color:#1f2937; }
-      .app-shell { max-width:1100px; margin:auto; padding:24px; }
-      .lecture-card { background:#fff; border-radius:22px; padding:34px; margin-top:22px; box-shadow:0 15px 40px rgba(15,23,42,.10); }
-      .hero-title { font-size:38px; font-weight:800; color:#123b69; margin-bottom:8px; }
-      .hero-subtitle { color:#64748b; font-size:18px; margin-bottom:24px; }
-      .identity-box { max-width:500px; margin:25px auto; text-align:left; }
-      .question-title { font-size:25px; line-height:1.42; font-weight:750; margin:12px 0 24px; }
-      .activity-label { color:#0d6efd; font-size:13px; font-weight:800; letter-spacing:1px; text-transform:uppercase; }
-      .progress-track { height:11px; border-radius:20px; background:#e2e8f0; overflow:hidden; margin:8px 0 24px; }
-      .progress-fill { height:100%; background:linear-gradient(90deg,#198754,#4fd1a1); transition:width .25s ease; }
-      .activity-box { background:#f5f9ff; border:1px solid #dbeafe; border-left:6px solid #0d6efd; border-radius:14px; padding:20px; margin:18px 0; }
-      .image-box { background:#f8fafc; border:1px solid #dce3eb; border-radius:14px; padding:14px; margin:18px 0; }
-      .metric-box { background:#fff; border:1px solid #dce3eb; border-radius:12px; padding:14px; margin:8px 0; }
-      .button-row { display:flex; flex-wrap:wrap; gap:12px; margin-top:22px; }
-      .feedback-correct { background:#ecfdf3; border-left:6px solid #198754; border-radius:12px; padding:18px; margin-top:22px; }
-      .feedback-incorrect { background:#fff1f2; border-left:6px solid #dc3545; border-radius:12px; padding:18px; margin-top:22px; }
-      .completion-badge { display:inline-block; background:#eaf7ef; color:#146c43; padding:8px 14px; border-radius:999px; font-weight:700; }
-      .final-score { font-size:58px; color:#123b69; font-weight:850; margin:20px 0; }
-      .index-result { margin-top:18px; padding:22px; border-radius:16px; color:#fff; background:linear-gradient(135deg,#146c43,#35a86b); text-align:center; }
-      .index-name { font-size:15px; font-weight:750; letter-spacing:1px; text-transform:uppercase; }
-      .index-value { margin:8px 0; font-size:46px; line-height:1; font-weight:850; }
-      .selection-pending { padding:22px; margin-top:12px; border:2px dashed #cbd5e1; border-radius:16px; color:#64748b; background:#f8fafc; text-align:center; }
-      .spatial-best { border:2px solid #198754; background:linear-gradient(180deg,#ffffff,#ecfdf3); }
-      .spatial-value { margin:8px 0; font-size:28px; font-weight:850; color:#123b69; }
-      .finest-badge { display:inline-block; margin-top:12px; padding:6px 11px; border-radius:999px; background:#198754; color:#fff; font-size:12px; font-weight:800; }
-      @media(max-width:700px) { .app-shell { padding:10px; } .lecture-card { padding:20px; } .hero-title { font-size:29px; } .button-row .btn { width:100%; } }
-    "))
-  ),
-  div(
-    class = "app-shell",
-    conditionalPanel(
-      condition = "!output.started_screen && !output.finished_screen",
-      div(
-        class = "lecture-card text-center",
-        div(class = "completion-badge", "Interactive learning module"),
-        div(class = "hero-title", "Remote Sensing: Introduction and Basic Concepts"),
-        div(class = "hero-subtitle", "Explore imagery, spectral behavior, color composites, indices, and spatial resolution."),
-        div(class = "identity-box", textInput("student_name", "Student name", placeholder = "Enter your full name")),
-        actionButton("start", "Start", class = "btn-primary btn-lg")
-      )
-    ),
-    conditionalPanel(
-      condition = "output.started_screen",
-      div(
-        class = "lecture-card",
-        div(strong("Student: "), textOutput("student_display", inline = TRUE)),
-        textOutput("progress_text"),
-        div(class = "progress-track", uiOutput("progress_bar")),
-        div(class = "activity-label", textOutput("activity", inline = TRUE)),
-        div(class = "question-title", textOutput("question")),
-        conditionalPanel(
-          "output.question_has_image",
-          div(
-            class = "image-box",
-            plotOutput("question_image", height = "480px", click = "image_click"),
-            textOutput("image_caption")
-          )
-        ),
-        conditionalPanel(
-          "output.is_multiple_choice",
-          radioButtons("answer", NULL, choices = initial_choices, selected = character(0))
-        ),
-        conditionalPanel(
-          "output.is_spatial_question",
-          div(
-            class = "activity-box",
-            h4("Compare spatial resolution"),
-            selectInput("spatial_image", "Image to inspect", c("RGB", "Multispectral", "Hyperspectral")),
-            div(class = "image-box", plotOutput("spatial_preview", height = "400px"), uiOutput("spatial_metadata")),
-            uiOutput("automatic_spatial_results"),
-            selectInput("finest_image", "Image with the finest spatial detail", c("Select" = "", "RGB", "Multispectral", "Hyperspectral"))
-          )
-        ),
-        conditionalPanel(
-          "output.is_composite_question",
-          div(
-            class = "activity-box",
-            h4("Build multispectral composites"),
-            selectInput("composite_type", "Composite", c("True color" = "TRUE_COLOR", "Color-infrared false color" = "FALSE_COLOR")),
-            fluidRow(
-              column(4, selectInput("display_red", "Red display channel", band_choices, "Red")),
-              column(4, selectInput("display_green", "Green display channel", band_choices, "Green")),
-              column(4, selectInput("display_blue", "Blue display channel", band_choices, "Blue"))
-            ),
-            div(class = "image-box", plotOutput("composite_preview", height = "430px")),
-            actionButton("save_composite", "Save current composite", class = "btn-info"),
-            uiOutput("composite_status")
-          )
-        ),
-        conditionalPanel(
-          "output.is_numeric_question",
-          div(class = "activity-box", h4(textOutput("formula", inline = TRUE)), uiOutput("pixel_values"), uiOutput("automatic_index_result"))
-        ),
-        conditionalPanel(
-          "output.is_spectral_question",
-          div(
-            class = "activity-box",
-            radioButtons("spectral_target", "Target to select", c("Vegetation" = "vegetation", "Soil" = "soil"), inline = TRUE),
-            plotlyOutput("spectral_plot", height = "440px"),
-            uiOutput("spectral_status"),
-            fluidRow(column(6, uiOutput("vegetation_reflectance_result")), column(6, uiOutput("soil_reflectance_result")))
-          )
-        ),
-        div(
-          class = "button-row",
-          actionButton("submit", "Submit Answer", class = "btn-primary btn-lg"),
-          actionButton("next_question", "Next Question", class = "btn-success btn-lg"),
-          downloadButton("download_results", "Download My Results", class = "btn-info btn-lg")
-        ),
-        uiOutput("feedback")
-      )
-    ),
-    conditionalPanel(
-      condition = "output.finished_screen",
-      div(
-        class = "lecture-card text-center",
-        div(class = "completion-badge", "Module completed"),
-        div(class = "hero-title", "Session Complete!"),
-        div(class = "hero-subtitle", "Thank you, ", textOutput("final_student", inline = TRUE), "!"),
-        div(class = "final-score", textOutput("final_score", inline = TRUE)),
-        downloadButton("download_results_final", "Download My Results", class = "btn-info btn-lg")
-      )
-    )
-  )
-)
-
-# ============================================================
-# SERVER
-# ============================================================
-server <- function(input, output, session) {
-  student_name <- reactiveVal(NULL)
-  started <- reactiveVal(FALSE)
-  finished <- reactiveVal(FALSE)
-  current_question <- reactiveVal(1)
-  submitted <- reactiveVal(rep(FALSE, length(questions)))
-  question_scores <- reactiveVal(rep(NA_integer_, length(questions)))
-  feedback_ui <- reactiveVal(NULL)
-  session_results <- reactiveVal(empty_results())
-
-  clicked_x <- reactiveVal(NA_real_)
-  clicked_y <- reactiveVal(NA_real_)
-  red_value <- reactiveVal(NA_real_)
-  green_value <- reactiveVal(NA_real_)
-  blue_value <- reactiveVal(NA_real_)
-  nir_value <- reactiveVal(NA_real_)
-  expected_index <- reactiveVal(NA_real_)
-
-  vegetation_spectrum <- reactiveVal(NULL)
-  soil_spectrum <- reactiveVal(NULL)
-  vegetation_expected <- reactiveVal(NULL)
-  soil_expected <- reactiveVal(NULL)
-
-  saved_true <- reactiveVal(NULL)
-  saved_false <- reactiveVal(NULL)
-
-  current_data <- reactive(questions[[current_question()]])
-
-  append_local_result <- function(result_row) {
-    current <- session_results()
-    session_results(rbind(current, result_row))
-    invisible(TRUE)
-  }
-
-  reset_activity <- function() {
-    clicked_x(NA_real_); clicked_y(NA_real_)
-    red_value(NA_real_); green_value(NA_real_); blue_value(NA_real_); nir_value(NA_real_)
-    expected_index(NA_real_)
-    vegetation_spectrum(NULL); soil_spectrum(NULL)
-    vegetation_expected(NULL); soil_expected(NULL)
-    saved_true(NULL); saved_false(NULL)
-    updateSelectInput(session, "finest_image", selected = "")
-    updateSelectInput(session, "spatial_image", selected = "RGB")
-    updateSelectInput(session, "composite_type", selected = "TRUE_COLOR")
-    updateSelectInput(session, "display_red", selected = "Red")
-    updateSelectInput(session, "display_green", selected = "Green")
-    updateSelectInput(session, "display_blue", selected = "Blue")
-    updateRadioButtons(session, "spectral_target", selected = "vegetation")
-  }
-
-  output$started_screen <- reactive(started() && !finished())
-  output$finished_screen <- reactive(finished())
-  output$is_multiple_choice <- reactive(current_data()$question_type == "MULTIPLE_CHOICE")
-  output$is_spatial_question <- reactive(current_data()$question_type == "SPATIAL_RESOLUTION")
-  output$is_composite_question <- reactive(current_data()$question_type == "BAND_ASSIGNMENT")
-  output$is_numeric_question <- reactive(current_data()$question_type %in% c("NUMERIC_GLI", "NUMERIC_NDVI"))
-  output$is_spectral_question <- reactive(current_data()$question_type == "SPECTRAL_BANDS")
-  output$question_has_image <- reactive(current_data()$image_type %in% c("RGB", "MS", "HYPER"))
-
-  for (output_id in c(
-    "started_screen", "finished_screen", "is_multiple_choice",
-    "is_spatial_question", "is_composite_question", "is_numeric_question",
-    "is_spectral_question", "question_has_image"
-  )) outputOptions(output, output_id, suspendWhenHidden = FALSE)
-
-  output$student_display <- renderText(student_name())
-  output$activity <- renderText(current_data()$activity)
-  output$question <- renderText(current_data()$question)
-  output$progress_text <- renderText(paste("Question", current_question(), "of", length(questions)))
-  output$progress_bar <- renderUI(div(class = "progress-fill", style = paste0("width:", current_question() / length(questions) * 100, "%")))
-  output$formula <- renderText(current_data()$formula)
-  output$feedback <- renderUI(feedback_ui())
-
-  output$question_image <- renderPlot({
-    image_type <- current_data()$image_type
-    if (image_type == "RGB") plotRGB(rgb_image, r = 1, g = 2, b = 3, stretch = "lin", axes = FALSE)
-    if (image_type == "MS") plotRGB(ms_image, r = 5, g = 3, b = 2, stretch = "lin", axes = FALSE)
-    if (image_type == "HYPER") plotRGB(hyper_image, r = hyper_rgb_bands[["Red"]], g = hyper_rgb_bands[["Green"]], b = hyper_rgb_bands[["Blue"]], stretch = "lin", axes = FALSE)
-    if (is.finite(clicked_x()) && is.finite(clicked_y())) points(clicked_x(), clicked_y(), pch = 21, bg = "red", col = "yellow", cex = 2)
-  }, res = 100)
-
-  output$image_caption <- renderText({
-    switch(current_data()$image_type,
-      RGB = "Click a green vegetation pixel.",
-      MS = "Click a vegetation pixel.",
-      HYPER = "Choose Vegetation or Soil, and then click the corresponding target.",
-      ""
-    )
-  })
-
-  observeEvent(input$image_click, {
-    coordinates <- matrix(c(input$image_click$x, input$image_click$y), ncol = 2)
-    question_type <- current_data()$question_type
-
-    if (question_type == "NUMERIC_GLI") {
-      values <- as.numeric(extract(rgb_image, coordinates)[1, 1:3])
-      if (length(values) < 3 || any(!is.finite(values))) return(showNotification("No valid RGB data were found.", type = "error"))
-      red_value(values[[1]]); green_value(values[[2]]); blue_value(values[[3]])
-      expected_index(safe_ratio(2 * green_value() - red_value() - blue_value(), 2 * green_value() + red_value() + blue_value()))
-    }
-
-    if (question_type == "NUMERIC_NDVI") {
-      values <- as.numeric(extract(ms_image, coordinates)[1, 1:5])
-      if (length(values) < 5 || any(!is.finite(values[c(3, 5)]))) return(showNotification("No valid red and NIR data were found.", type = "error"))
-      red_value(values[[3]]); nir_value(values[[5]])
-      expected_index(safe_ratio(nir_value() - red_value(), nir_value() + red_value()))
-    }
-
-    if (question_type == "SPECTRAL_BANDS") {
-      values <- as.numeric(extract(hyper_image, coordinates)[1, seq_len(nlyr(hyper_image))])
-      if (length(values) != nlyr(hyper_image) || all(!is.finite(values))) return(showNotification("No valid hyperspectral data were found.", type = "error"))
-      spectrum <- data.frame(Wavelength_nm = hyper_wavelengths, Reflectance = values)
-      expected_values <- values[target_bands]
-      names(expected_values) <- names(target_wavelengths)
-      if (input$spectral_target == "vegetation") {
-        vegetation_spectrum(spectrum); vegetation_expected(expected_values)
-        updateRadioButtons(session, "spectral_target", selected = "soil")
-        showNotification("Vegetation spectrum saved. Now click a soil pixel.")
-      } else {
-        soil_spectrum(spectrum); soil_expected(expected_values)
-        showNotification("Soil spectrum saved. Review the results and submit.")
-      }
-    }
-
-    clicked_x(input$image_click$x); clicked_y(input$image_click$y)
-  }, ignoreInit = TRUE)
-
-  output$pixel_values <- renderUI({
-    if (!is.finite(clicked_x())) return(div(class = "metric-box", strong("Pixel selection: "), "No pixel selected."))
-    if (current_data()$question_type == "NUMERIC_GLI") {
-      return(div(class = "metric-box", h4("Extracted RGB values"),
-        tags$p(tags$strong("Red: "), formatC(red_value(), format = "f", digits = 3)),
-        tags$p(tags$strong("Green: "), formatC(green_value(), format = "f", digits = 3)),
-        tags$p(tags$strong("Blue: "), formatC(blue_value(), format = "f", digits = 3))))
-    }
-    if (current_data()$question_type == "NUMERIC_NDVI") {
-      return(div(class = "metric-box", h4("Extracted multispectral values"),
-        tags$p(tags$strong("Red: "), formatC(red_value(), format = "f", digits = 3)),
-        tags$p(tags$strong("NIR: "), formatC(nir_value(), format = "f", digits = 3))))
-    }
-  })
-
-  output$automatic_index_result <- renderUI({
-    question_type <- current_data()$question_type
-    if (!question_type %in% c("NUMERIC_GLI", "NUMERIC_NDVI")) return(NULL)
-    if (!is.finite(expected_index())) return(div(class = "selection-pending", h4("No result yet"), p("Click a vegetation pixel.")))
-    index_name <- if (question_type == "NUMERIC_GLI") "GLI" else "NDVI"
-    calculated_value <- round(expected_index(), 3)
-    div(class = "index-result",
-      div(class = "index-name", paste(index_name, "result")),
-      div(class = "index-value", formatC(calculated_value, format = "f", digits = 3)),
-      div(interpret_index(index_name, calculated_value)))
-  })
-
-  output$spatial_preview <- renderPlot({
-    req(input$spatial_image)
-    if (input$spatial_image == "RGB") plotRGB(rgb_image, r = 1, g = 2, b = 3, stretch = "lin", axes = FALSE)
-    if (input$spatial_image == "Multispectral") plotRGB(ms_image, r = 3, g = 2, b = 1, stretch = "lin", axes = FALSE)
-    if (input$spatial_image == "Hyperspectral") plotRGB(hyper_image, r = hyper_rgb_bands[["Red"]], g = hyper_rgb_bands[["Green"]], b = hyper_rgb_bands[["Blue"]], stretch = "lin", axes = FALSE)
-  }, res = 100)
-
-  output$spatial_metadata <- renderUI({
-    req(input$spatial_image)
-    raster <- switch(input$spatial_image, RGB = rgb_image, Multispectral = ms_image, Hyperspectral = hyper_image)
-    div(class = "metric-box", paste("Rows:", nrow(raster), "| Columns:", ncol(raster), "| Bands:", nlyr(raster), "| Resolution:", spatial_resolution_cm[[input$spatial_image]], "cm/pixel"))
-  })
-
-  output$automatic_spatial_results <- renderUI({
-    spatial_card <- function(image_name) {
-      resolution <- unname(spatial_resolution_cm[[image_name]])
-      area <- unname(pixel_area_cm2[[image_name]])
-      is_finest <- resolution == min(spatial_resolution_cm)
-      div(class = if (is_finest) "metric-box spatial-best" else "metric-box",
-        h4(image_name),
-        div(class = "spatial-value", paste0(resolution, " cm/pixel")),
-        tags$p(tags$strong("Pixel ground area: "), paste0(area, " cm²")),
-        if (is_finest) div(class = "finest-badge", "Smallest pixel size"))
-    }
-    fluidRow(column(4, spatial_card("RGB")), column(4, spatial_card("Multispectral")), column(4, spatial_card("Hyperspectral")))
-  })
-
-  output$composite_preview <- renderPlot({
-    req(input$display_red, input$display_green, input$display_blue)
-    plotRGB(ms_image,
-      r = unname(ms_bands[[input$display_red]]),
-      g = unname(ms_bands[[input$display_green]]),
-      b = unname(ms_bands[[input$display_blue]]),
-      stretch = "lin", axes = FALSE)
-  }, res = 100)
-
-  observeEvent(input$composite_type, {
-    if (input$composite_type == "TRUE_COLOR") {
-      updateSelectInput(session, "display_red", selected = "Red")
-      updateSelectInput(session, "display_green", selected = "Green")
-      updateSelectInput(session, "display_blue", selected = "Blue")
-    } else {
-      updateSelectInput(session, "display_red", selected = "NIR")
-      updateSelectInput(session, "display_green", selected = "Red")
-      updateSelectInput(session, "display_blue", selected = "Green")
-    }
-  }, ignoreInit = TRUE)
-
-  observeEvent(input$save_composite, {
-    assignment <- c(Red = input$display_red, Green = input$display_green, Blue = input$display_blue)
-    if (input$composite_type == "TRUE_COLOR") {
-      saved_true(assignment)
-      updateSelectInput(session, "composite_type", selected = "FALSE_COLOR")
-      showNotification("True-color composite saved. Now create false color.")
-    } else {
-      saved_false(assignment)
-      showNotification("False-color composite saved. You can submit.")
-    }
-  }, ignoreInit = TRUE)
-
-  output$composite_status <- renderUI({
-    div(class = "metric-box",
-      strong("True color: "), if (is.null(saved_true())) "Not saved" else paste(saved_true(), collapse = ", "), br(),
-      strong("False color: "), if (is.null(saved_false())) "Not saved" else paste(saved_false(), collapse = ", "))
-  })
-
-  output$spectral_plot <- renderPlotly({
-    validate(need(!is.null(vegetation_spectrum()) || !is.null(soil_spectrum()), "Click a target to create a spectral curve."))
-    plot <- plot_ly()
-    if (!is.null(vegetation_spectrum())) plot <- add_trace(plot, data = vegetation_spectrum(), x = ~Wavelength_nm, y = ~Reflectance, type = "scatter", mode = "lines", name = "Vegetation", line = list(color = "#198754", width = 3))
-    if (!is.null(soil_spectrum())) plot <- add_trace(plot, data = soil_spectrum(), x = ~Wavelength_nm, y = ~Reflectance, type = "scatter", mode = "lines", name = "Soil", line = list(color = "#9a6b3f", width = 3))
-    layout(plot, hovermode = "x unified", xaxis = list(title = "Wavelength (nm)"), yaxis = list(title = "Reflectance"))
-  })
-
-  output$spectral_status <- renderUI(div(class = "metric-box", paste("Selected bands:", paste(names(actual_target_wavelengths), round(actual_target_wavelengths, 2), "nm", collapse = " | "))))
-
-  reflectance_card <- function(expected, label) {
-    if (is.null(expected)) return(div(class = "selection-pending", h4(label), p(paste("Select", label, "and click a pixel."))))
-    div(class = "metric-box", h4(label),
-      tags$p(tags$strong("Green: "), formatC(expected[["Green"]], format = "f", digits = 4)),
-      tags$p(tags$strong("NIR: "), formatC(expected[["NIR"]], format = "f", digits = 4)))
-  }
-
-  output$vegetation_reflectance_result <- renderUI(reflectance_card(vegetation_expected(), "Vegetation"))
-  output$soil_reflectance_result <- renderUI(reflectance_card(soil_expected(), "Soil"))
-
-  observeEvent(input$start, {
-    entered_name <- clean_name(input$student_name %||% "")
-    if (!nzchar(entered_name)) return(showNotification("Enter your name.", type = "warning"))
-    student_name(entered_name)
-    started(TRUE); finished(FALSE); current_question(1)
-    submitted(rep(FALSE, length(questions)))
-    question_scores(rep(NA_integer_, length(questions)))
-    session_results(empty_results())
-    reset_activity(); feedback_ui(NULL)
-    updateRadioButtons(session, "answer", choices = initial_choices, selected = character(0))
-    shinyjs::enable("submit"); shinyjs::disable("next_question")
-  }, ignoreInit = TRUE)
-
-  observeEvent(input$submit, {
-    question_number <- current_question()
-    question <- current_data()
-    question_type <- question$question_type
-    if (submitted()[question_number]) return()
-
-    answer <- NULL
-    correct <- FALSE
-
-    if (question_type == "MULTIPLE_CHOICE") {
-      answer <- input$answer
-      if (is.null(answer) || !nzchar(answer)) return(showNotification("Select an answer.", type = "warning"))
-      correct <- identical(answer, question$correct)
-    }
-
-    if (question_type %in% c("NUMERIC_GLI", "NUMERIC_NDVI")) {
-      if (!is.finite(expected_index())) return(showNotification("Click a vegetation pixel before submitting.", type = "warning"))
-      answer <- formatC(expected_index(), format = "f", digits = 3)
-      correct <- TRUE
-    }
-
-    if (question_type == "SPATIAL_RESOLUTION") {
-      if (is.null(input$finest_image) || !nzchar(input$finest_image)) return(showNotification("Select the image with the finest spatial detail.", type = "warning"))
-      correct <- identical(input$finest_image, "RGB")
-      answer <- paste0("Selected finest=", input$finest_image)
-    }
-
-    if (question_type == "BAND_ASSIGNMENT") {
-      if (is.null(saved_true()) || is.null(saved_false())) return(showNotification("Save both composites first.", type = "warning"))
-      correct <- identical(unname(saved_true()), unname(true_assignment)) && identical(unname(saved_false()), unname(false_assignment))
-      answer <- paste(paste0("True color: ", paste(saved_true(), collapse = "/")), paste0("False color: ", paste(saved_false(), collapse = "/")), sep = "; ")
-    }
-
-    if (question_type == "SPECTRAL_BANDS") {
-      if (is.null(vegetation_expected()) || is.null(soil_expected())) return(showNotification("Select vegetation and soil pixels before submitting.", type = "warning"))
-      vegetation_result <- vegetation_expected(); soil_result <- soil_expected()
-      answer <- paste(
-        paste0("Vegetation Green=", formatC(vegetation_result[["Green"]], format = "f", digits = 4)),
-        paste0("Vegetation NIR=", formatC(vegetation_result[["NIR"]], format = "f", digits = 4)),
-        paste0("Soil Green=", formatC(soil_result[["Green"]], format = "f", digits = 4)),
-        paste0("Soil NIR=", formatC(soil_result[["NIR"]], format = "f", digits = 4)),
-        sep = "; "
-      )
-      correct <- TRUE
-    }
-
-    question_id <- paste0("Q", question_number)
-    normalized_name <- normalize_name(student_name())
-    result_row <- data.frame(
-      Time = format(Sys.time(), "%Y-%m-%d %H:%M:%S", tz = "UTC"),
-      Course_ID = course_id,
-      Student_ID = normalized_name,
-      Student = student_name(),
-      Question_ID = question_id,
-      Activity = question$activity,
-      Question = question$question,
-      Answer = as.character(answer),
-      Correct = if (correct) "TRUE" else "FALSE",
-      Request_ID = new_request_id(),
-      Submission_Key = paste(course_id, normalized_name, question_id, sep = "|"),
-      Clicked_X = ifelse(is.finite(clicked_x()), clicked_x(), NA_real_),
-      Clicked_Y = ifelse(is.finite(clicked_y()), clicked_y(), NA_real_),
-      Red_Value = ifelse(is.finite(red_value()), red_value(), NA_real_),
-      Green_Value = ifelse(is.finite(green_value()), green_value(), NA_real_),
-      Blue_Value = ifelse(is.finite(blue_value()), blue_value(), NA_real_),
-      NIR_Value = ifelse(is.finite(nir_value()), nir_value(), NA_real_),
-      Expected_Index = ifelse(is.finite(expected_index()), expected_index(), NA_real_),
-      stringsAsFactors = FALSE
-    )[required_columns]
-
-    append_local_result(result_row)
-
-    status <- submitted(); status[question_number] <- TRUE; submitted(status)
-    scores <- question_scores(); scores[question_number] <- if (correct) 1L else 0L; question_scores(scores)
-
-    if (correct) {
-      feedback_ui(div(class = "feedback-correct", h4("Submitted successfully"), p(question$explanation)))
-    } else {
-      correction <- if (question_type == "SPATIAL_RESOLUTION") {
-        "RGB is the finest at 1 cm/pixel."
-      } else if (question_type == "BAND_ASSIGNMENT") {
-        "True color is Red/Green/Blue. False color is NIR/Red/Green."
-      } else {
-        paste("Correct answer:", question$correct)
-      }
-      feedback_ui(div(class = "feedback-incorrect", h4("Incorrect"), p(correction), p(question$explanation)))
-    }
-
-    shinyjs::disable("submit"); shinyjs::enable("next_question")
-  }, ignoreInit = TRUE)
-
-  observeEvent(input$next_question, {
-    if (!submitted()[current_question()]) return()
-    if (current_question() >= length(questions)) {
-      finished(TRUE); started(FALSE); feedback_ui(NULL); return()
-    }
-    current_question(current_question() + 1)
-    reset_activity(); feedback_ui(NULL)
-    next_question <- current_data()
-    if (next_question$question_type == "MULTIPLE_CHOICE") {
-      updateRadioButtons(session, "answer", choices = setNames(next_question$values, next_question$choices), selected = character(0))
-    }
-    shinyjs::enable("submit"); shinyjs::disable("next_question")
-  }, ignoreInit = TRUE)
-
-  output$final_student <- renderText(student_name())
-  output$final_score <- renderText(paste0(sum(question_scores(), na.rm = TRUE), " / ", length(questions)))
-
-  download_results <- function(file) {
-    write.csv(session_results(), file, row.names = FALSE, na = "")
-  }
-
-  output$download_results <- downloadHandler(
-    filename = function() paste0("HTP_results_", normalize_name(student_name() %||% "student"), ".csv"),
-    content = download_results
-  )
-
-  output$download_results_final <- downloadHandler(
-    filename = function() paste0("HTP_results_", normalize_name(student_name() %||% "student"), ".csv"),
-    content = download_results
-  )
-}
-
-shinyApp(ui = ui, server = server)
+shinyApp(ui,server)
