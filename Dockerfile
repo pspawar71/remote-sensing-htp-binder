@@ -7,6 +7,7 @@ ENV APP_HOME=/home/pawar
 
 USER root
 
+# System libraries required by terra, sf, and leaflet dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgdal-dev \
     libgeos-dev \
@@ -17,31 +18,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpng-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Install required R packages
 COPY install.R /tmp/install.R
 
-RUN Rscript /tmp/install.R
+RUN Rscript /tmp/install.R \
+    && rm -f /tmp/install.R
 
+# Create the application directory
 RUN mkdir -p ${APP_HOME}
 
+# Copy the repository to /home/pawar
 COPY . ${APP_HOME}
 
-# Application location used by Shiny
+# Set permissions and make the Binder startup hook executable
 RUN chown -R ${NB_UID}:users ${APP_HOME} \
     && chmod -R a+rX ${APP_HOME} \
     && chmod +x ${APP_HOME}/start
 
-# Separate editable copy visible in the RStudio Files pane
-RUN mkdir -p /home/rstudio/pawar \
-    && cp -a ${APP_HOME}/. /home/rstudio/pawar/ \
-    && chmod -R a+rwX /home/rstudio/pawar
-RUN mkdir -p /home/${NB_USER}/.jupyter
+# Create a shortcut visible from the RStudio home directory
+RUN mkdir -p /home/rstudio \
+    && ln -sfn ${APP_HOME} /home/rstudio/pawar
 
-COPY jupyter_server_config.py \
-    /home/${NB_USER}/.jupyter/jupyter_server_config.py
-
-RUN chown -R ${NB_UID}:users \
-    /home/${NB_USER}/.jupyter
-    
 USER ${NB_USER}
 
 WORKDIR ${APP_HOME}
