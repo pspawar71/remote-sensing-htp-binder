@@ -1,11 +1,52 @@
 #!/bin/bash
 set -e
 
-R --vanilla -q -e "shiny::runApp(
-  '/home/pawar',
-  host = '0.0.0.0',
-  port = 3838,
-  launch.browser = FALSE
-)" > /tmp/shiny.log 2>&1 &
+APP_DIR="/home/pawar"
+PORT="3838"
+LOG_FILE="/tmp/shiny.log"
 
-exec "$@"
+echo "Starting Shiny application from ${APP_DIR}..."
+
+R --vanilla -q -e "
+shiny::runApp(
+  appDir = '${APP_DIR}',
+  host = '0.0.0.0',
+  port = ${PORT},
+  launch.browser = FALSE
+)
+" > "${LOG_FILE}" 2>&1 &
+
+SHINY_PID=$!
+
+echo "Shiny process ID: ${SHINY_PID}"
+echo "Waiting for Shiny to become available..."
+
+for attempt in $(seq 1 120); do
+
+  if ! kill -0 "${SHINY_PID}" 2>/dev/null; then
+    echo "The Shiny application stopped during startup."
+    echo "========== SHINY LOG =========="
+    cat "${LOG_FILE}"
+    echo "==============================="
+    exit 1
+  fi
+
+  if curl --silent --fail \
+    "http://127.0.0.1:${PORT}/" \
+    > /dev/null 2>&1; then
+
+    echo "Shiny is ready on port ${PORT}."
+    exec "$@"
+  fi
+
+  sleep 1
+done
+
+echo "Shiny did not become available within 120 seconds."
+echo "========== SHINY LOG =========="
+cat "${LOG_FILE}"
+echo "==============================="
+
+kill "${SHINY_PID}" 2>/dev/null || true
+
+exit 1
