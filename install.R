@@ -1,18 +1,3 @@
-packages <- c(
-  "shiny",
-  "shinyjs",
-  "plotly",
-  "terra"
-)
-
-missing_packages <- packages[
-  !vapply(packages, requireNamespace, logical(1), quietly = TRUE)
-]
-
-if (length(missing_packages) > 0) {
-  install.packages(
-    missing_packages,
-    repos = "https://cloud.r-project.org",
-    Ncpus = max(1L, parallel::detectCores(logical = FALSE))
-  )
-}
+packages <- c("shiny","shinyjs","plotly","terra","leaflet","leaflet.extras","sf","jsonlite")
+missing <- packages[!vapply(packages,requireNamespace,logical(1),quietly=TRUE)]
+if(length(missing)) install.packages(missing,repos="https://cloud.r-project.org",Ncpus=2)
