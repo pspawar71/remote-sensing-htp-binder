@@ -31,13 +31,21 @@ hyper_image <- terra::rast(paths[["hyper"]])
 
 # A non-geospatial hyperspectral image may not contain a valid map extent.
 # Assign pixel coordinates so plot clicking and terra::extract() still work.
-hyper_extent_values <- as.numeric(terra::ext(hyper_image))
-if (
+hyper_extent <- terra::ext(hyper_image)
+hyper_extent_values <- c(
+  terra::xmin(hyper_extent),
+  terra::xmax(hyper_extent),
+  terra::ymin(hyper_extent),
+  terra::ymax(hyper_extent)
+)
+
+hyper_extent_is_invalid <-
   length(hyper_extent_values) != 4 ||
   any(!is.finite(hyper_extent_values)) ||
-  hyper_extent_values[1] == hyper_extent_values[2] ||
-  hyper_extent_values[3] == hyper_extent_values[4]
-) {
+  hyper_extent_values[1] >= hyper_extent_values[2] ||
+  hyper_extent_values[3] >= hyper_extent_values[4]
+
+if (hyper_extent_is_invalid) {
   terra::ext(hyper_image) <- terra::ext(
     0, terra::ncol(hyper_image),
     0, terra::nrow(hyper_image)
