@@ -53,12 +53,6 @@ git push
 
 ## Binder links
 
-### Launch the Shiny application directly
-
-```text
-https://mybinder.org/v2/gh/pspawar71/remote-sensing-htp-binder/main?urlpath=proxy/3838/
-```
-
 ### Launch browser-based RStudio
 
 ```text
