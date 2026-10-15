@@ -1,4 +1,11 @@
 #!/bin/bash
 set -e
-R -q -e "shiny::runApp('/home/pawar',host='0.0.0.0',port=3838,launch.browser=FALSE)" > /tmp/shiny.log 2>&1 &
+
+R --vanilla -q -e "shiny::runApp(
+  '/home/pawar',
+  host = '0.0.0.0',
+  port = 3838,
+  launch.browser = FALSE
+)" > /tmp/shiny.log 2>&1 &
+
 exec "$@"
