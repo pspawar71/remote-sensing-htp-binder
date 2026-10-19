@@ -117,7 +117,6 @@ shiny::runApp()
 - Assessment results are stored only in memory during that session.
 - Learners should download their CSV results before closing the session.
 - Session data and generated files may disappear when Binder shuts down.
-- Do not upload confidential, personal, or sensitive data to the public repository.
 
 ## Expected output
 
