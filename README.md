@@ -1,6 +1,6 @@
-# Remote Sensing and High-Throughput Phenotyping
+# Remote Sensing and GIS
 
-Interactive Shiny lecture with 10 questions. Results are stored only in each browser session and can be downloaded as CSV. There is no Google Sheets integration and no credential file is required.
+Interactive Shiny lecture with 10 questions. Results are stored only in each browser session and can be downloaded as CSV. 
 
 ## Repository structure
 
@@ -36,19 +36,6 @@ The wavelength CSV must have a column named `wavelength_nm` with one row per hyp
 ```r
 install.packages(c("shiny", "shinyjs", "plotly", "terra"))
 shiny::runApp()
-```
-
-## Upload to GitHub
-
-1. Create a new public GitHub repository.
-2. Upload all repository files and the `image` folder.
-3. Ensure `start` remains executable when using Git. If uploading through the browser, Binder usually still processes the file, but command-line Git is safer:
-
-```bash
-git add .
-git update-index --chmod=+x start
-git commit -m "Add Binder Shiny app"
-git push
 ```
 
 ## Binder links
