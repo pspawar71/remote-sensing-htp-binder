@@ -103,7 +103,7 @@ R will display a local address. Open that address in a web browser if it does no
 ## Run in Binder (Launch browser-based RStudio)
 
 ```text
-https://mybinder.org/v2/gh/pspawar71/remote-sensing-htp-binder/main?urlpath=rstudio
+[Launch the Phenomic Tutorial repository](https://mybinder.org/v2/gh/pspawar71/remote-sensing-htp-binder/main?urlpath=rstudio)
 ```
 After RStudio opens, run:
 
