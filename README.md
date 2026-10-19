@@ -1,6 +1,6 @@
 # Remote Sensing and GIS
 
-Interactive Shiny lecture with 10 questions. Results are stored only in each browser session and can be downloaded as CSV. 
+Interactive Shiny lecture with 20 questions. Results are stored only in each browser session and can be downloaded as CSV. 
 
 ## Repository structure
 
