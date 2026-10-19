@@ -107,7 +107,7 @@ R will display a local address. Open that address in a web browser if it does no
 After RStudio opens, run:
 
 ```r
-shiny::runApp()
+runApp('pawar')
 ```
 
 ## Assessment results and data privacy
