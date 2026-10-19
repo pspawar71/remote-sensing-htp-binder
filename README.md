@@ -20,17 +20,6 @@ Interactive Shiny lecture with 10 questions. Results are stored only in each bro
 └── README.md
 ```
 
-## Required image files
-
-Add these files to `image/` before pushing to GitHub:
-
-- `rgb_image.tif`
-- `multispectral_image.tif`
-- `hyper.tif`
-- `wavelengths.csv`
-
-The wavelength CSV must have a column named `wavelength_nm` with one row per hyperspectral band.
-
 ## Run locally
 
 ```r
