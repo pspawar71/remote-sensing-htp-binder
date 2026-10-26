@@ -102,7 +102,7 @@ R will display a local address. Open that address in a web browser if it does no
 
 ## Run in Binder (Launch browser-based RStudio)
 
-[Launch the Phenomic Tutorial repository](https://mybinder.org/v2/gh/pspawar71/remote-sensing-htp-binder/main?urlpath=rstudio)
+[Launch the Remote Sensing and GIS Knowledge Assessment repository](https://mybinder.org/v2/gh/pspawar71/remote-sensing-htp-binder/main?urlpath=rstudio)
 
 After RStudio opens, run:
 
